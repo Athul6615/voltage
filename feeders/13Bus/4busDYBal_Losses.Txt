@@ -1,0 +1,18 @@
+
+LOSSES REPORT
+
+Power Delivery Element Loss Report
+
+Element                  kW Losses    % of Power   kvar Losses
+
+"Line.LINE1"      39.30219,     0.66     80.4294
+"Transformer.T1"  87.90560,     1.48     527.438
+"Line.LINE2"     441.77326,     7.56     908.124
+
+LINE LOSSES=                       481.1 kW
+TRANSFORMER LOSSES=                 87.9 kW
+
+TOTAL LOSSES=                      569.0 kW
+
+TOTAL LOAD POWER =                5400.0 kW
+Percent Losses for Circuit =     10.54 %
