@@ -8,39 +8,17 @@ import pathlib
 def check_convergence(dss):
     return dss.solution.converged
 
-def reset_load_models_to_cvr(dss):
-    # Set all loads to CVR model (model=5)
+def run_analysis(dss, load_model, multipliers):
+    # Set all loads to the specified model
     for name in dss.loads.names:
         if name and name.lower() != "none":
             dss.loads.name = name
-            dss.loads.model = 5  # CVR model
-
-def main():
-    dss = py_dss_interface.DSS()
-    script_path = os.path.dirname(os.path.abspath(__file__))
-    paths = [
-        pathlib.Path(script_path).joinpath("feeders", "123Bus", "Run_IEEE123Bus.DSS"),
-        pathlib.Path(script_path).joinpath("123Bus", "Run_IEEE123Bus.DSS"),
-        pathlib.Path(script_path).joinpath("Run_IEEE123Bus.DSS"),
-        pathlib.Path(script_path).joinpath("feeders", "Run_IEEE123Bus.DSS")
-    ]
-    for path in paths:
-        if path.exists():
-            dss.text(f'compile "{str(path)}"')
-            break
-    else:
-        raise FileNotFoundError("123-bus DSS file not found")
-
-    dss.text("set mode=snapshot")
-    dss.text("set controlmode=static")
-    dss.text("set maxiterations=100")
-    dss.text("set tolerance=0.001")
-    reset_load_models_to_cvr(dss)
+            dss.loads.model = load_model
 
     dss.text("solve")
     if not check_convergence(dss):
-        print("Initial solve failed. Exiting.")
-        return
+        print(f"Initial solve failed for model {load_model}. Exiting.")
+        return None
 
     load_names = dss.loads.names
     original_loads = {}
@@ -51,7 +29,7 @@ def main():
             'kvar': dss.loads.kvar
         }
 
-    # Only include "live" buses
+    # Find all live buses at base case
     base_voltages = {}
     for bus in dss.circuit.buses_names:
         dss.circuit.set_active_bus(bus)
@@ -61,7 +39,6 @@ def main():
             base_voltages[bus] = mag
     live_buses = [bus for bus, v in base_voltages.items() if v > 0.4]
 
-    multipliers = np.linspace(0, 10, 80)  # Large range to see CVR behavior
     results = {
         'multiplier': [],
         'total_load': [],
@@ -71,7 +48,12 @@ def main():
     }
 
     for m in multipliers:
-        reset_load_models_to_cvr(dss)
+        # Reset load model for all loads before applying new values
+        for name in dss.loads.names:
+            if name and name.lower() != "none":
+                dss.loads.name = name
+                dss.loads.model = load_model
+
         total_kw = 0
         for name in load_names:
             dss.loads.name = name
@@ -105,16 +87,9 @@ def main():
                 results['bus_voltages'][bus].append(mag)
             else:
                 results['bus_voltages'][bus].append(np.nan)
+    return results, live_buses
 
-    # --- Plot 1: Losses and voltage profile ---
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
-    ax1.plot(results['multiplier'], results['total_losses'], 'r-', linewidth=2)
-    ax1.set_title('Total System Losses vs Load Multiplier (CVR Model)', fontweight='bold', fontsize=14)
-    ax1.set_xlabel('Load Multiplier (Lambda)', fontsize=12)
-    ax1.set_ylabel('Total System Losses (kW)', fontsize=12)
-    ax1.grid(True, alpha=0.3)
-
-    # Voltage profile for all buses (highlight weakest)
+def get_weakest_bus(results, live_buses):
     weakest_bus = None
     min_overall = float('inf')
     for bus in live_buses:
@@ -123,53 +98,92 @@ def main():
         if min_v < min_overall:
             min_overall = min_v
             weakest_bus = bus
-    for bus in live_buses:
-        ax2.plot(results['multiplier'], results['bus_voltages'][bus], 
-                 label=bus if bus==weakest_bus else None, 
-                 color='red' if bus==weakest_bus else None, 
-                 linewidth=2 if bus==weakest_bus else 0.8, 
-                 alpha=1 if bus==weakest_bus else 0.45)
-    ax2.set_title('Voltage Profile vs Load Multiplier (All Buses, CVR Model)', fontweight='bold', fontsize=14)
-    ax2.set_xlabel('Load Multiplier (Lambda)', fontsize=12)
-    ax2.set_ylabel('Bus Voltage (kV)', fontsize=12)
-    if weakest_bus:
-        ax2.legend(title="Critical Bus", loc='upper right')
-    ax2.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
+    return weakest_bus
 
-    # --- Plot 2: PV (Nose) Curve for Weakest Bus ---
-    v_weakest = results['bus_voltages'][weakest_bus]
-    mult = np.array(results['multiplier'])
-    v_weakest = np.array(v_weakest)
-    # Detect collapse point as the last point before NaN or minimum
-    collapse_idx = np.where(np.isnan(v_weakest))[0]
+def get_collapse_point(mult, v_curve):
+    v_curve = np.array(v_curve)
+    collapse_idx = np.where(np.isnan(v_curve))[0]
     if len(collapse_idx) > 0:
         collapse_idx = collapse_idx[0] - 1
     else:
-        collapse_idx = np.argmin(v_weakest)
+        collapse_idx = np.argmin(v_curve)
     collapse_lambda = mult[collapse_idx]
-    collapse_voltage = v_weakest[collapse_idx]
+    collapse_voltage = v_curve[collapse_idx]
+    return collapse_lambda, collapse_voltage
 
-    plt.figure(figsize=(8, 6))
-    plt.plot(mult, v_weakest, 'b-', linewidth=2)
-    plt.plot(collapse_lambda, collapse_voltage, 'ro', markersize=10, label="Voltage Collapse Point")
-    plt.title(f'PV (Nose) Curve at Critical Bus: {weakest_bus} (CVR Model)', fontweight='bold', fontsize=16)
-    plt.xlabel('Lambda (Load Multiplier)', fontsize=13)
-    plt.ylabel(f'Voltage at bus {weakest_bus} (kV)', fontsize=13)
+def main():
+    dss = py_dss_interface.DSS()
+    script_path = os.path.dirname(os.path.abspath(__file__))
+    paths = [
+        pathlib.Path(script_path).joinpath("feeders", "123Bus", "Run_IEEE123Bus.DSS"),
+        pathlib.Path(script_path).joinpath("123Bus", "Run_IEEE123Bus.DSS"),
+        pathlib.Path(script_path).joinpath("Run_IEEE123Bus.DSS"),
+        pathlib.Path(script_path).joinpath("feeders", "Run_IEEE123Bus.DSS")
+    ]
+    for path in paths:
+        if path.exists():
+            dss.text(f'compile "{str(path)}"')
+            break
+    else:
+        raise FileNotFoundError("123-bus DSS file not found")
+
+    dss.text("set mode=snapshot")
+    dss.text("set controlmode=static")
+    dss.text("set maxiterations=100")
+    dss.text("set tolerance=0.001")
+
+    multipliers = np.linspace(0, 10, 80)
+
+    # PQ Analysis
+    pq_results, live_buses = run_analysis(dss, 1, multipliers)
+    # CVR Analysis (re-compile DSS file to reset)
+    dss.text(f'compile "{str(path)}"')
+    dss.text("set mode=snapshot")
+    dss.text("set controlmode=static")
+    dss.text("set maxiterations=100")
+    dss.text("set tolerance=0.001")
+    cvr_results, _ = run_analysis(dss, 5, multipliers)
+
+    # Find weakest bus (use PQ's weakest for apples-to-apples)
+    weakest_bus = get_weakest_bus(pq_results, live_buses)
+    v_curve_pq = pq_results['bus_voltages'][weakest_bus]
+    v_curve_cvr = cvr_results['bus_voltages'][weakest_bus]
+    mult = np.array(pq_results['multiplier'])
+    cl_pq, v_pq = get_collapse_point(mult, v_curve_pq)
+    cl_cvr, v_cvr = get_collapse_point(mult, v_curve_cvr)
+
+    # Plot system losses comparison
+    plt.figure(figsize=(10,6))
+    plt.plot(pq_results['multiplier'], pq_results['total_losses'], label='PQ Model', linewidth=2)
+    plt.plot(cvr_results['multiplier'], cvr_results['total_losses'], label='CVR Model', linewidth=2)
+    plt.title("Total System Losses vs Load Multiplier\n(PQ vs CVR)", fontsize=15)
+    plt.xlabel('Load Multiplier (Lambda)', fontsize=12)
+    plt.ylabel('Total System Losses (kW)', fontsize=12)
+    plt.grid(True, alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Plot voltage nose curve for weakest bus
+    plt.figure(figsize=(10,6))
+    plt.plot(mult, v_curve_pq, label='PQ Model', linewidth=2)
+    plt.plot(mult, v_curve_cvr, label='CVR Model', linewidth=2)
+    plt.plot(cl_pq, v_pq, 'ro', label="PQ Collapse Point")
+    plt.plot(cl_cvr, v_cvr, 'mo', label="CVR Collapse Point")
+    plt.title(f'PV (Nose) Curve at Critical Bus: {weakest_bus}\n(PQ vs CVR)', fontsize=15)
+    plt.xlabel('Lambda (Load Multiplier)', fontsize=12)
+    plt.ylabel(f'Voltage at bus {weakest_bus} (kV)', fontsize=12)
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
     plt.show()
 
-    print("\nAnalysis Complete (CVR Model)")
+    print("\nComparison Summary")
     print("=====================")
     print(f"Critical (weakest) Bus: {weakest_bus}")
-    print(f"Estimated Collapse Multiplier: {collapse_lambda:.2f}")
-    print(f"Voltage at Collapse: {collapse_voltage:.4f} kV")
+    print(f"PQ Collapse Multiplier: {cl_pq:.2f}, Voltage at Collapse: {v_pq:.4f} kV")
+    print(f"CVR Collapse Multiplier: {cl_cvr:.2f}, Voltage at Collapse: {v_cvr:.4f} kV")
     print("=====================")
 
 if __name__ == "__main__":
     main()
-
-
