@@ -9,7 +9,6 @@ def check_convergence(dss):
     return dss.solution.converged
 
 def run_analysis(dss, load_model, multipliers):
-    # Set all loads to the specified model
     for name in dss.loads.names:
         if name and name.lower() != "none":
             dss.loads.name = name
@@ -29,7 +28,6 @@ def run_analysis(dss, load_model, multipliers):
             'kvar': dss.loads.kvar
         }
 
-    # Find all live buses at base case
     base_voltages = {}
     for bus in dss.circuit.buses_names:
         dss.circuit.set_active_bus(bus)
@@ -48,7 +46,6 @@ def run_analysis(dss, load_model, multipliers):
     }
 
     for m in multipliers:
-        # Reset load model for all loads before applying new values
         for name in dss.loads.names:
             if name and name.lower() != "none":
                 dss.loads.name = name
@@ -67,7 +64,6 @@ def run_analysis(dss, load_model, multipliers):
         results['converged'].append(converged)
 
         if not converged:
-            # After first failure, fill the rest with NaN
             for bus in live_buses:
                 results['bus_voltages'][bus].append(np.nan)
             results['multiplier'].append(m)
@@ -102,6 +98,10 @@ def get_weakest_bus(results, live_buses):
 
 def get_collapse_point(mult, v_curve):
     v_curve = np.array(v_curve)
+    mult = np.array(mult)
+    n = min(len(mult), len(v_curve))
+    v_curve = v_curve[:n]
+    mult = mult[:n]
     collapse_idx = np.where(np.isnan(v_curve))[0]
     if len(collapse_idx) > 0:
         collapse_idx = collapse_idx[0] - 1
@@ -144,18 +144,20 @@ def main():
     dss.text("set tolerance=0.001")
     cvr_results, _ = run_analysis(dss, 5, multipliers)
 
-    # Find weakest bus (use PQ's weakest for apples-to-apples)
+    # Use only converged range for each case!
+    pq_mult = pq_results['multiplier']
+    cvr_mult = cvr_results['multiplier']
+
     weakest_bus = get_weakest_bus(pq_results, live_buses)
     v_curve_pq = pq_results['bus_voltages'][weakest_bus]
     v_curve_cvr = cvr_results['bus_voltages'][weakest_bus]
-    mult = np.array(pq_results['multiplier'])
-    cl_pq, v_pq = get_collapse_point(mult, v_curve_pq)
-    cl_cvr, v_cvr = get_collapse_point(mult, v_curve_cvr)
+    cl_pq, v_pq = get_collapse_point(pq_mult, v_curve_pq)
+    cl_cvr, v_cvr = get_collapse_point(cvr_mult, v_curve_cvr)
 
     # Plot system losses comparison
     plt.figure(figsize=(10,6))
-    plt.plot(pq_results['multiplier'], pq_results['total_losses'], label='PQ Model', linewidth=2)
-    plt.plot(cvr_results['multiplier'], cvr_results['total_losses'], label='CVR Model', linewidth=2)
+    plt.plot(pq_mult, pq_results['total_losses'], label='PQ Model', linewidth=2)
+    plt.plot(cvr_mult, cvr_results['total_losses'], label='CVR Model', linewidth=2)
     plt.title("Total System Losses vs Load Multiplier\n(PQ vs CVR)", fontsize=15)
     plt.xlabel('Load Multiplier (Lambda)', fontsize=12)
     plt.ylabel('Total System Losses (kW)', fontsize=12)
@@ -166,8 +168,8 @@ def main():
 
     # Plot voltage nose curve for weakest bus
     plt.figure(figsize=(10,6))
-    plt.plot(mult, v_curve_pq, label='PQ Model', linewidth=2)
-    plt.plot(mult, v_curve_cvr, label='CVR Model', linewidth=2)
+    plt.plot(pq_mult, v_curve_pq, label='PQ Model', linewidth=2)
+    plt.plot(cvr_mult, v_curve_cvr, label='CVR Model', linewidth=2)
     plt.plot(cl_pq, v_pq, 'ro', label="PQ Collapse Point")
     plt.plot(cl_cvr, v_cvr, 'mo', label="CVR Collapse Point")
     plt.title(f'PV (Nose) Curve at Critical Bus: {weakest_bus}\n(PQ vs CVR)', fontsize=15)
