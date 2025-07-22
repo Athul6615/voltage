@@ -199,6 +199,25 @@ def main():
                 results['bus_voltages'][bus] = []
             results['bus_voltages'][bus].append(voltage)
 
+    # Post-analysis for weakest bus and voltage collapse
+    voltage_at_max_load = {bus: voltages[-1] for bus, voltages in results['bus_voltages'].items()}
+    weakest_bus = min(voltage_at_max_load, key=voltage_at_max_load.get)
+    weakest_voltage = voltage_at_max_load[weakest_bus]
+
+    min_voltage_points = [min([v[i] for v in results['bus_voltages'].values()]) for i in range(len(results['load_added']))]
+    collapse_index = np.argmin(min_voltage_points)
+    collapse_load = results['load_added'][collapse_index]
+    collapse_voltage = min_voltage_points[collapse_index]
+
+    print("\n--- Weakest Bus Analysis ---")
+    print(f"Weakest Bus: {weakest_bus}")
+    print(f"Voltage at Max Load: {weakest_voltage:.4f} kV")
+
+    print("\n--- Voltage Collapse Estimate ---")
+    print(f"Estimated Collapse Load Addition: {collapse_load} kW per bus")
+    print(f"Minimum Bus Voltage at Collapse: {collapse_voltage:.4f} kV")
+
+    # Plotting
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     ax1.plot(results['load_added'], results['total_losses'], 'r-o')
     ax1.set_title('Total System Losses vs Load Addition')
@@ -213,6 +232,8 @@ def main():
     ax2.set_xlabel('Load Addition per Bus (kW)')
     ax2.set_ylabel('Voltage (kV)')
     ax2.grid(True)
+    ax2.axvline(collapse_load, color='red', linestyle='--', linewidth=1)
+    ax2.text(collapse_load, collapse_voltage + 0.1, f'Nose Tip ~{collapse_load}kW', color='red')
     ax2.legend(fontsize=6, bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
     plt.show()
