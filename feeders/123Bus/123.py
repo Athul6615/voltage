@@ -26,7 +26,6 @@ def improve_convergence(dss, increment, attempt=1):
         {
             'name': 'PQ Model - Increased Iterations',
             'commands': [
-                "batchedit load..* model=1",
                 "set loadmodel=1",
                 "set maxiterations=300",
                 "set tolerance=0.0001",
@@ -36,7 +35,6 @@ def improve_convergence(dss, increment, attempt=1):
         {
             'name': 'PQ Model - Newton-Raphson',
             'commands': [
-                "batchedit load..* model=1",
                 "set algorithm=newton",
                 "set maxiterations=200",
                 "set tolerance=0.001",
@@ -53,17 +51,22 @@ def improve_convergence(dss, increment, attempt=1):
 
 
 def reset_convergence_parameters(dss):
-    cmds = [
-        "set maxiterations=100",
-        "set tolerance=0.001",
-        "set algorithm=normal",
-        "set loadmodel=1",
-        "batchedit load..* model=1",
-        "batchedit regcontrol..* enabled=yes",
-        "batchedit capcontrol..* enabled=yes"
-    ]
-    for cmd in cmds:
-        dss.text(cmd)
+    dss.text("set maxiterations=100")
+    dss.text("set tolerance=0.001")
+    dss.text("set algorithm=normal")
+    dss.text("set loadmodel=1")
+
+    for name in dss.loads.names:
+        dss.loads.name = name
+        dss.loads.model = 1
+
+    for name in dss.regcontrols.names:
+        dss.regcontrols.name = name
+        dss.regcontrols.enabled = True
+
+    for name in dss.capcontrols.names:
+        dss.capcontrols.name = name
+        dss.capcontrols.enabled = True
 
 
 def main():
@@ -149,7 +152,6 @@ def main():
                 results['bus_voltages'][bus] = []
             results['bus_voltages'][bus].append(voltage)
 
-    # Plot: Losses and Voltage Profile
     fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     ax1.plot(results['multiplier'], results['total_losses'], 'r-', linewidth=2)
     ax1.set_title('System Losses vs Load Multiplier (PQ Model)')
@@ -167,7 +169,6 @@ def main():
     plt.tight_layout()
     plt.show()
 
-    # Find weakest bus and instability point
     weakest_at_end = min({b: v[-1] for b, v in results['bus_voltages'].items()}.items(), key=lambda x: x[1])
     weakest_bus = weakest_at_end[0]
 
@@ -175,7 +176,6 @@ def main():
                               for i in range(len(results['multiplier']))])
     collapse_multiplier = results['multiplier'][collapse_idx]
 
-    # Plot: Weakest bus + collapse point
     fig2, ax = plt.subplots(figsize=(10, 6))
     for bus, voltages in results['bus_voltages'].items():
         if len(voltages) == len(results['multiplier']):
