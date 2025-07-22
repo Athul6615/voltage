@@ -93,7 +93,14 @@ def main():
         if not converged:
             raise RuntimeError("Initial convergence failed")
     load_names = dss.loads.names
-    original_loads = {name: {'kw': dss.loads.kw, 'kvar': dss.loads.kvar} for name in load_names}
+    # ---- FIXED: Safely build original_loads dict ----
+    original_loads = {}
+    for name in load_names:
+        dss.loads.name = name
+        original_loads[name] = {
+            'kw': dss.loads.kw,
+            'kvar': dss.loads.kvar
+        }
     multipliers = np.linspace(0, 5, 200)
     results = {
         'multiplier': [],
