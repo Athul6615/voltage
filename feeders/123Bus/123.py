@@ -1,4 +1,5 @@
 
+
 import py_dss_interface
 import matplotlib.pyplot as plt
 import numpy as np
@@ -39,47 +40,6 @@ def improve_convergence(dss, increment, attempt=1):
                 "set algorithm=newton",
                 "set maxiterations=200",
                 "set tolerance=0.001",
-                "solve"
-            ]
-        },
-        {
-            'name': 'PQ Model - Relaxed Tolerance',
-            'commands': [
-                "batchedit load..* model=1",
-                "set algorithm=normal",
-                "set maxiterations=500",
-                "set tolerance=0.01",
-                "solve"
-            ]
-        },
-        {
-            'name': 'Constant Impedance Model',
-            'commands': [
-                "batchedit load..* model=2",
-                "set loadmodel=2",
-                "set maxiterations=200",
-                "set tolerance=0.001",
-                "solve"
-            ]
-        },
-        {
-            'name': 'PQ Model - Disable Controls',
-            'commands': [
-                "batchedit load..* model=1",
-                "batchedit regcontrol..* enabled=no",
-                "batchedit capcontrol..* enabled=no",
-                "set maxiterations=300",
-                "set tolerance=0.001",
-                "solve"
-            ]
-        },
-        {
-            'name': 'Very Relaxed Settings',
-            'commands': [
-                "batchedit load..* model=1",
-                "set algorithm=normal",
-                "set maxiterations=1000",
-                "set tolerance=0.1",
                 "solve"
             ]
         }
@@ -123,23 +83,13 @@ def main():
     else:
         raise FileNotFoundError("123-bus DSS file not found")
 
-    setup_cmds = [
-        "set mode=snapshot",
-        "set maxiterations=100",
-        "set tolerance=0.001",
-        "set maxcontroliter=50",
-        "set controlmode=static",
-        "set loadmodel=1",
-        "batchedit load..* model=1"
-    ]
-    for cmd in setup_cmds:
-        dss.text(cmd)
-
+    dss.text("set mode=snapshot")
+    reset_convergence_parameters(dss)
     dss.text("solve")
     converged, _ = check_convergence_detailed(dss)
 
     if not converged:
-        for attempt in range(1, 7):
+        for attempt in range(1, 3):
             converged, _ = improve_convergence(dss, 0, attempt)
             if converged:
                 break
@@ -150,30 +100,30 @@ def main():
     original_loads = {name: {'kw': dss.loads.kw, 'kvar': dss.loads.kvar}
                       for name in load_names}
 
-    load_increments = np.arange(0, 5000, 25)
+    multipliers = np.linspace(0, 5, 200)
     results = {
-        'load_added': [],
+        'multiplier': [],
         'total_load': [],
         'total_losses': [],
         'bus_voltages': {}
     }
 
-    for increment in load_increments:
+    for m in multipliers:
         total_kw = 0
         for name in load_names:
             dss.loads.name = name
             orig = original_loads[name]
-            dss.loads.kw = orig['kw'] + increment
-            dss.loads.kvar = orig['kvar'] + increment * 0.4
-            total_kw += orig['kw'] + increment
+            dss.loads.kw = orig['kw'] * m
+            dss.loads.kvar = orig['kvar'] * m
+            total_kw += orig['kw'] * m
 
         reset_convergence_parameters(dss)
         dss.text("solve")
         converged, _ = check_convergence_detailed(dss)
 
         if not converged:
-            for attempt in range(1, 7):
-                converged, _ = improve_convergence(dss, increment, attempt)
+            for attempt in range(1, 3):
+                converged, _ = improve_convergence(dss, m, attempt)
                 if converged:
                     break
             if not converged:
@@ -190,7 +140,7 @@ def main():
                 voltage_mag = (v[0]**2 + v[1]**2)**0.5 / 1000
                 bus_voltages[bus] = voltage_mag
 
-        results['load_added'].append(increment)
+        results['multiplier'].append(m)
         results['total_load'].append(total_kw)
         results['total_losses'].append(abs(losses))
 
@@ -199,44 +149,55 @@ def main():
                 results['bus_voltages'][bus] = []
             results['bus_voltages'][bus].append(voltage)
 
-    # Post-analysis for weakest bus and voltage collapse
-    voltage_at_max_load = {bus: voltages[-1] for bus, voltages in results['bus_voltages'].items()}
-    weakest_bus = min(voltage_at_max_load, key=voltage_at_max_load.get)
-    weakest_voltage = voltage_at_max_load[weakest_bus]
-
-    min_voltage_points = [min([v[i] for v in results['bus_voltages'].values()]) for i in range(len(results['load_added']))]
-    collapse_index = np.argmin(min_voltage_points)
-    collapse_load = results['load_added'][collapse_index]
-    collapse_voltage = min_voltage_points[collapse_index]
-
-    print("\n--- Weakest Bus Analysis ---")
-    print(f"Weakest Bus: {weakest_bus}")
-    print(f"Voltage at Max Load: {weakest_voltage:.4f} kV")
-
-    print("\n--- Voltage Collapse Estimate ---")
-    print(f"Estimated Collapse Load Addition: {collapse_load} kW per bus")
-    print(f"Minimum Bus Voltage at Collapse: {collapse_voltage:.4f} kV")
-
-    # Plotting
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-    ax1.plot(results['load_added'], results['total_losses'], 'r-o')
-    ax1.set_title('Total System Losses vs Load Addition')
-    ax1.set_xlabel('Load Addition per Bus (kW)')
+    # Plot: Losses and Voltage Profile
+    fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    ax1.plot(results['multiplier'], results['total_losses'], 'r-', linewidth=2)
+    ax1.set_title('System Losses vs Load Multiplier (PQ Model)')
+    ax1.set_xlabel('Load Multiplier (× base load)')
     ax1.set_ylabel('Total System Losses (kW)')
     ax1.grid(True)
 
-    for bus, voltages in results['bus_voltages'].items():
-        if len(voltages) == len(results['load_added']):
-            ax2.plot(results['load_added'], voltages, label=bus)
-    ax2.set_title('Voltage Nose Curve (All Buses)')
-    ax2.set_xlabel('Load Addition per Bus (kW)')
+    for bus, volts in results['bus_voltages'].items():
+        if len(volts) == len(results['multiplier']):
+            ax2.plot(results['multiplier'], volts, label=bus)
+    ax2.set_title('Voltage Profile vs Load Multiplier (All Buses)')
+    ax2.set_xlabel('Load Multiplier (× base load)')
     ax2.set_ylabel('Voltage (kV)')
     ax2.grid(True)
-    ax2.axvline(collapse_load, color='red', linestyle='--', linewidth=1)
-    ax2.text(collapse_load, collapse_voltage + 0.1, f'Nose Tip ~{collapse_load}kW', color='red')
-    ax2.legend(fontsize=6, bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
     plt.show()
+
+    # Find weakest bus and instability point
+    weakest_at_end = min({b: v[-1] for b, v in results['bus_voltages'].items()}.items(), key=lambda x: x[1])
+    weakest_bus = weakest_at_end[0]
+
+    collapse_idx = np.argmin([min([v[i] for v in results['bus_voltages'].values()])
+                              for i in range(len(results['multiplier']))])
+    collapse_multiplier = results['multiplier'][collapse_idx]
+
+    # Plot: Weakest bus + collapse point
+    fig2, ax = plt.subplots(figsize=(10, 6))
+    for bus, voltages in results['bus_voltages'].items():
+        if len(voltages) == len(results['multiplier']):
+            color = 'red' if bus == weakest_bus else 'gray'
+            ax.plot(results['multiplier'], voltages, label=bus if bus == weakest_bus else None, color=color,
+                    linewidth=2 if bus == weakest_bus else 0.8, alpha=1 if bus == weakest_bus else 0.3)
+
+    ax.axvline(collapse_multiplier, linestyle='--', color='blue', label=f'Nose Tip ≈ {collapse_multiplier:.2f}×')
+    ax.set_title('Weakest Bus and Voltage Collapse Point')
+    ax.set_xlabel('Load Multiplier (× base load)')
+    ax.set_ylabel('Voltage (kV)')
+    ax.grid(True)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    print("\nAnalysis Summary")
+    print("=====================")
+    print(f"Weakest Bus: {weakest_bus}")
+    print(f"Voltage at Max Load: {weakest_at_end[1]:.4f} kV")
+    print(f"Estimated Collapse Multiplier: {collapse_multiplier:.2f}")
+    print("=====================")
 
 
 if __name__ == "__main__":
