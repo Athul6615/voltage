@@ -60,13 +60,17 @@ def reset_convergence_parameters(dss):
         dss.loads.name = name
         dss.loads.model = 1
 
-    for name in dss.regcontrols.names:
-        dss.regcontrols.name = name
-        dss.regcontrols.enabled = True
+    if dss.regcontrols.count > 0:
+        for name in dss.regcontrols.names:
+            if name.lower() != "none":
+                dss.regcontrols.name = name
+                dss.regcontrols.enabled = True
 
-    for name in dss.capcontrols.names:
-        dss.capcontrols.name = name
-        dss.capcontrols.enabled = True
+    if dss.capcontrols.count > 0:
+        for name in dss.capcontrols.names:
+            if name.lower() != "none":
+                dss.capcontrols.name = name
+                dss.capcontrols.enabled = True
 
 
 def main():
@@ -152,6 +156,7 @@ def main():
                 results['bus_voltages'][bus] = []
             results['bus_voltages'][bus].append(voltage)
 
+    # Plot losses and voltage profiles
     fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     ax1.plot(results['multiplier'], results['total_losses'], 'r-', linewidth=2)
     ax1.set_title('System Losses vs Load Multiplier (PQ Model)')
@@ -169,6 +174,7 @@ def main():
     plt.tight_layout()
     plt.show()
 
+    # Weakest bus and collapse detection
     weakest_at_end = min({b: v[-1] for b, v in results['bus_voltages'].items()}.items(), key=lambda x: x[1])
     weakest_bus = weakest_at_end[0]
 
@@ -201,4 +207,3 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
