@@ -1,5 +1,4 @@
 
-
 import py_dss_interface
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,11 +8,12 @@ import pathlib
 def check_convergence(dss):
     return dss.solution.converged
 
-def reset_load_models(dss):
+def reset_load_models_to_cvr(dss):
+    # Set all loads to CVR model (model=5)
     for name in dss.loads.names:
         if name and name.lower() != "none":
             dss.loads.name = name
-            dss.loads.model = 1
+            dss.loads.model = 5  # CVR model
 
 def main():
     dss = py_dss_interface.DSS()
@@ -35,7 +35,7 @@ def main():
     dss.text("set controlmode=static")
     dss.text("set maxiterations=100")
     dss.text("set tolerance=0.001")
-    reset_load_models(dss)
+    reset_load_models_to_cvr(dss)
 
     dss.text("solve")
     if not check_convergence(dss):
@@ -61,7 +61,7 @@ def main():
             base_voltages[bus] = mag
     live_buses = [bus for bus, v in base_voltages.items() if v > 0.4]
 
-    multipliers = np.linspace(0, 10, 80)  # Larger range for collapse visualization
+    multipliers = np.linspace(0, 10, 80)  # Large range to see CVR behavior
     results = {
         'multiplier': [],
         'total_load': [],
@@ -71,7 +71,7 @@ def main():
     }
 
     for m in multipliers:
-        reset_load_models(dss)
+        reset_load_models_to_cvr(dss)
         total_kw = 0
         for name in load_names:
             dss.loads.name = name
@@ -109,7 +109,7 @@ def main():
     # --- Plot 1: Losses and voltage profile ---
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
     ax1.plot(results['multiplier'], results['total_losses'], 'r-', linewidth=2)
-    ax1.set_title('Total System Losses vs Load Multiplier', fontweight='bold', fontsize=14)
+    ax1.set_title('Total System Losses vs Load Multiplier (CVR Model)', fontweight='bold', fontsize=14)
     ax1.set_xlabel('Load Multiplier (Lambda)', fontsize=12)
     ax1.set_ylabel('Total System Losses (kW)', fontsize=12)
     ax1.grid(True, alpha=0.3)
@@ -129,7 +129,7 @@ def main():
                  color='red' if bus==weakest_bus else None, 
                  linewidth=2 if bus==weakest_bus else 0.8, 
                  alpha=1 if bus==weakest_bus else 0.45)
-    ax2.set_title('Voltage Profile vs Load Multiplier (All Buses)', fontweight='bold', fontsize=14)
+    ax2.set_title('Voltage Profile vs Load Multiplier (All Buses, CVR Model)', fontweight='bold', fontsize=14)
     ax2.set_xlabel('Load Multiplier (Lambda)', fontsize=12)
     ax2.set_ylabel('Bus Voltage (kV)', fontsize=12)
     if weakest_bus:
@@ -154,7 +154,7 @@ def main():
     plt.figure(figsize=(8, 6))
     plt.plot(mult, v_weakest, 'b-', linewidth=2)
     plt.plot(collapse_lambda, collapse_voltage, 'ro', markersize=10, label="Voltage Collapse Point")
-    plt.title(f'PV (Nose) Curve at Critical Bus: {weakest_bus}', fontweight='bold', fontsize=16)
+    plt.title(f'PV (Nose) Curve at Critical Bus: {weakest_bus} (CVR Model)', fontweight='bold', fontsize=16)
     plt.xlabel('Lambda (Load Multiplier)', fontsize=13)
     plt.ylabel(f'Voltage at bus {weakest_bus} (kV)', fontsize=13)
     plt.legend()
@@ -162,7 +162,7 @@ def main():
     plt.tight_layout()
     plt.show()
 
-    print("\nAnalysis Complete")
+    print("\nAnalysis Complete (CVR Model)")
     print("=====================")
     print(f"Critical (weakest) Bus: {weakest_bus}")
     print(f"Estimated Collapse Multiplier: {collapse_lambda:.2f}")
@@ -171,3 +171,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
