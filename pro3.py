@@ -25,85 +25,252 @@ def check_convergence_detailed(dss):
     return converged, convergence_info
 
 
-def improve_convergence(dss, lambda_val, attempt=1):
+def set_zip_load_model(dss, z_percent=50, i_percent=30, p_percent=20):
     """
-    Apply multiple convergence strategies systematically
-    """
-    print(f"    Convergence attempt {attempt} for λ = {lambda_val}")
+    Configure ZIP load model for all loads in the system
 
+    Parameters:
+    z_percent: Percentage of constant impedance component (0-100)
+    i_percent: Percentage of constant current component (0-100)
+    p_percent: Percentage of constant power component (0-100)
+
+    Note: z_percent + i_percent + p_percent should equal 100
+    """
+    # Convert percentages to fractions
+    z_frac = z_percent / 100.0
+    i_frac = i_percent / 100.0
+    p_frac = p_percent / 100.0
+
+    # Normalize if they don't add up to 1
+    total = z_frac + i_frac + p_frac
+    if abs(total - 1.0) > 0.001:
+        z_frac /= total
+        i_frac /= total
+        p_frac /= total
+
+    load_names = dss.loads.names
+    print(f"Setting ZIP load model (Z:{z_percent}%, I:{i_percent}%, P:{p_percent}%) for {len(load_names)} loads")
+
+    for load_name in load_names:
+        dss.loads.name = load_name
+
+        # Set ZIP coefficients for real power
+        dss.loads.zipv = [z_frac, i_frac, p_frac, z_frac, i_frac, p_frac]
+
+        # Alternative method using text commands for more control
+        dss.text(
+            f"load.{load_name}.zipv=[{z_frac:.3f},{i_frac:.3f},{p_frac:.3f},{z_frac:.3f},{i_frac:.3f},{p_frac:.3f}]")
+
+        # Set load model to use ZIP coefficients
+        dss.loads.model = 1  # Model 1 uses ZIP coefficients
+
+
+def continuation_power_flow_step_zip(dss, lambda_val, base_loads, critical_bus_name, zip_coeffs):
+    """
+    Perform a continuation power flow step for given lambda value with ZIP load model
+    """
+    # Set loads based on lambda parameter with ZIP model characteristics
+    for load_name, base_load in base_loads.items():
+        dss.loads.name = load_name
+
+        # Get current bus voltage for ZIP calculations
+        try:
+            dss.circuit.set_active_bus(dss.loads.bus1)
+            bus_voltages = dss.bus.voltages
+            if bus_voltages:
+                voltage_mag = abs(complex(bus_voltages[0], bus_voltages[1] if len(bus_voltages) > 1 else 0))
+                voltage_pu = voltage_mag / (dss.bus.kv_base * 1000)
+            else:
+                voltage_pu = 1.0
+        except:
+            voltage_pu = 1.0
+
+        # Calculate ZIP load components
+        # P_total = P_Z * (V/V0)^2 + P_I * (V/V0) + P_P
+        # where P_Z, P_I, P_P are the Z, I, P components respectively
+
+        base_kw = base_load['kw']
+        base_kvar = base_load['kvar']
+
+        # Apply loading factor and ZIP characteristics
+        z_frac, i_frac, p_frac = zip_coeffs
+
+        # For the continuation method, we scale the base load by (1 + lambda)
+        # The ZIP model will naturally adjust based on voltage
+        new_kw = base_kw * (1 + lambda_val)
+        new_kvar = base_kvar * (1 + lambda_val)
+
+        dss.loads.kw = new_kw
+        dss.loads.kvar = new_kvar
+
+    # Try multiple solution strategies with increased robustness for ZIP loads
     strategies = [
-        # Strategy 1: Increase iterations with tight tolerance
-        {
-            'name': 'Increased Iterations',
-            'commands': [
-                "set maxiterations=200",
-                "set tolerance=0.0001",
-                "solve"
-            ]
-        },
-
-        # Strategy 2: Newton-Raphson with moderate tolerance
-        {
-            'name': 'Newton-Raphson',
-            'commands': [
-                "set algorithm=newton",
-                "set maxiterations=150",
-                "set tolerance=0.001",
-                "solve"
-            ]
-        },
-
-        # Strategy 3: Relaxed tolerance with more iterations
-        {
-            'name': 'Relaxed Tolerance',
-            'commands': [
-                "set algorithm=normal",
-                "set maxiterations=300",
-                "set tolerance=0.01",
-                "solve"
-            ]
-        }
+        {'algo': 'normal', 'max_iter': 150, 'tol': 0.0001},
+        {'algo': 'normal', 'max_iter': 200, 'tol': 0.001},
+        {'algo': 'newton', 'max_iter': 200, 'tol': 0.001},
+        {'algo': 'normal', 'max_iter': 300, 'tol': 0.01},
+        {'algo': 'newton', 'max_iter': 250, 'tol': 0.01},
+        {'algo': 'normal', 'max_iter': 500, 'tol': 0.1}
     ]
 
-    if attempt <= len(strategies):
-        strategy = strategies[attempt - 1]
-        print(f"      Trying strategy: {strategy['name']}")
+    converged = False
+    voltage_pu = None
 
-        try:
-            for command in strategy['commands']:
-                dss.text(command)
+    for strategy in strategies:
+        # Reset and apply strategy
+        dss.text(f"set algorithm={strategy['algo']}")
+        dss.text(f"set maxiterations={strategy['max_iter']}")
+        dss.text(f"set tolerance={strategy['tol']}")
+        dss.text("set controlmode=static")
 
-            converged, conv_info = check_convergence_detailed(dss)
+        # Solve
+        dss.text("solve")
+        converged, _ = check_convergence_detailed(dss)
 
-            if converged:
-                print(f"      ✓ Converged with {strategy['name']}")
-            else:
-                print(f"      ❌ Failed with {strategy['name']}")
+        if converged:
+            # Get voltage at critical bus
+            try:
+                dss.circuit.set_active_bus(critical_bus_name)
+                bus_voltages = dss.bus.voltages
+                if bus_voltages:
+                    voltage_mag = abs(complex(bus_voltages[0], bus_voltages[1] if len(bus_voltages) > 1 else 0))
+                    voltage_pu = voltage_mag / (dss.bus.kv_base * 1000)
+                    break
+            except:
+                converged = False
+                continue
 
-            return converged, conv_info
-
-        except Exception as e:
-            print(f"      Error in strategy {strategy['name']}: {e}")
-            return False, None
-
-    return False, None
+    return converged, voltage_pu, lambda_val
 
 
-def reset_convergence_parameters(dss):
+def predictor_corrector_pv_curve_zip(dss, base_loads, critical_bus_name, zip_coeffs, max_lambda=5.0, initial_step=0.02):
     """
-    Reset DSS to default convergence parameters
+    Generate P-V curve using predictor-corrector continuation method with ZIP loads
     """
-    dss.text("set maxiterations=100")
-    dss.text("set tolerance=0.001")
-    dss.text("set algorithm=normal")
-    dss.text("set loadmodel=1")
-    dss.text("batchedit regcontrol..* enabled=yes")
-    dss.text("batchedit capcontrol..* enabled=yes")
+    lambda_values = []
+    voltages = []
+    converged_flags = []
+    actual_loads = []  # Track actual power consumption
+
+    # Start from base case
+    lambda_val = 0.0
+    step_size = initial_step
+    min_step = 0.0005
+    max_step = 0.05
+
+    # Get base case voltage
+    converged, voltage_pu, _ = continuation_power_flow_step_zip(dss, lambda_val, base_loads, critical_bus_name,
+                                                                zip_coeffs)
+    if converged:
+        lambda_values.append(lambda_val)
+        voltages.append(voltage_pu)
+        converged_flags.append(True)
+
+        # Calculate actual load consumed
+        total_actual_load = 0
+        for load_name in base_loads.keys():
+            dss.loads.name = load_name
+            total_actual_load += dss.loads.kw
+        actual_loads.append(total_actual_load)
+
+        prev_voltage = voltage_pu
+        prev_lambda = lambda_val
+
+        print(f"Base case: λ = {lambda_val:.3f}, V = {voltage_pu:.3f} pu, Load = {total_actual_load:.1f} kW")
+    else:
+        print("Base case failed to converge!")
+        return lambda_values, voltages, converged_flags, actual_loads
+
+    consecutive_failures = 0
+    max_consecutive_failures = 3
+
+    # Forward continuation to find the maximum loadability
+    while lambda_val < max_lambda and consecutive_failures < max_consecutive_failures:
+        # Predictor step
+        lambda_val += step_size
+
+        # Corrector step
+        converged, voltage_pu, _ = continuation_power_flow_step_zip(dss, lambda_val, base_loads, critical_bus_name,
+                                                                    zip_coeffs)
+
+        if converged and voltage_pu is not None and voltage_pu > 0.05:
+            lambda_values.append(lambda_val)
+            voltages.append(voltage_pu)
+            converged_flags.append(True)
+
+            # Calculate actual load consumed with ZIP model
+            total_actual_load = 0
+            for load_name in base_loads.keys():
+                dss.loads.name = load_name
+                total_actual_load += dss.loads.kw
+            actual_loads.append(total_actual_load)
+
+            consecutive_failures = 0
+
+            # Check if we've passed the nose (voltage starts increasing significantly)
+            if len(voltages) > 2:
+                voltage_trend = voltages[-1] - voltages[-2]
+                prev_voltage_trend = voltages[-2] - voltages[-3] if len(voltages) > 2 else 0
+
+                if voltage_trend > 0 and prev_voltage_trend < 0:
+                    print(f"Potential nose point detected at λ = {lambda_val:.3f}, V = {voltage_pu:.3f} pu")
+                    step_size = max(min_step, step_size * 0.3)
+
+            # Adaptive step size control based on voltage change
+            if len(voltages) > 1:
+                voltage_change = abs(voltage_pu - prev_voltage)
+                if voltage_change > 0.03:  # Large voltage change
+                    step_size = max(min_step, step_size * 0.6)
+                elif voltage_change < 0.005:  # Small voltage change
+                    step_size = min(max_step, step_size * 1.3)
+
+            prev_voltage = voltage_pu
+            prev_lambda = lambda_val
+
+            print(
+                f"λ = {lambda_val:.3f}, V = {voltage_pu:.3f} pu, Load = {total_actual_load:.1f} kW, Step = {step_size:.4f}")
+
+            # More aggressive continuation - only stop at very low voltages
+            if voltage_pu < 0.1:
+                print("Voltage critically low, stopping continuation")
+                break
+
+        else:
+            print(f"Failed to converge at λ = {lambda_val:.3f}, reducing step size")
+            lambda_val -= step_size  # Step back
+            step_size = max(min_step, step_size * 0.4)
+            consecutive_failures += 1
+
+            if step_size <= min_step and consecutive_failures >= 2:
+                print("Minimum step size reached with multiple failures, attempting final push...")
+                # Try a few more very small steps
+                for micro_step in [0.001, 0.0005, 0.0001]:
+                    lambda_val += micro_step
+                    converged, voltage_pu, _ = continuation_power_flow_step_zip(dss, lambda_val, base_loads,
+                                                                                critical_bus_name, zip_coeffs)
+                    if converged and voltage_pu is not None and voltage_pu > 0.05:
+                        lambda_values.append(lambda_val)
+                        voltages.append(voltage_pu)
+                        converged_flags.append(True)
+                        # Calculate actual load
+                        total_actual_load = 0
+                        for load_name in base_loads.keys():
+                            dss.loads.name = load_name
+                            total_actual_load += dss.loads.kw
+                        actual_loads.append(total_actual_load)
+                        print(
+                            f"Final point: λ = {lambda_val:.3f}, V = {voltage_pu:.3f} pu, Load = {total_actual_load:.1f} kW")
+                    else:
+                        lambda_val -= micro_step  # Step back
+                        break
+                break
+
+    return lambda_values, voltages, converged_flags, actual_loads
 
 
-def get_critical_bus_voltage(dss):
+def find_critical_bus(dss):
     """
-    Get the minimum voltage magnitude across all buses (critical bus)
+    Find the bus with the lowest voltage (most critical)
     """
     bus_names = [bus for bus in dss.circuit.buses_names if "sourcebus" not in bus.lower()]
     min_voltage = float('inf')
@@ -114,251 +281,234 @@ def get_critical_bus_voltage(dss):
             dss.circuit.set_active_bus(bus_name)
             bus_voltages = dss.bus.voltages
             if bus_voltages:
-                # Calculate voltage magnitude
                 voltage_mag = abs(complex(bus_voltages[0], bus_voltages[1] if len(bus_voltages) > 1 else 0))
-                voltage_kv = voltage_mag / 1000
-
-                if voltage_kv < min_voltage:
-                    min_voltage = voltage_kv
+                voltage_pu = voltage_mag / (dss.bus.kv_base * 1000)
+                if voltage_pu < min_voltage and voltage_pu > 0:
+                    min_voltage = voltage_pu
                     critical_bus = bus_name
         except:
             continue
 
-    return min_voltage, critical_bus
+    return critical_bus
 
 
-def run_pv_curve_analysis():
-    """
-    Run P-V curve analysis for voltage stability assessment
-    """
-    # Initialize DSS
-    print("Initializing OpenDSS...")
-    dss = py_dss_interface.DSS()
+# Initialize DSS
+print("Initializing OpenDSS...")
+dss = py_dss_interface.DSS()
 
-    # Load IEEE 13-bus system
-    script_path = os.path.dirname(os.path.abspath(__file__))
-    dss_file = pathlib.Path(script_path).joinpath("feeders", "13bus", "IEEE13Nodeckt.dss")
+# Load IEEE 13-bus system
+script_path = os.path.dirname(os.path.abspath(__file__))
+dss_file = pathlib.Path(script_path).joinpath("feeders", "13bus", "IEEE13Nodeckt.dss")
 
-    if not dss_file.exists():
-        print(f"Error: File not found - {dss_file}")
-        return
+if not dss_file.exists():
+    print(f"Error: File not found - {dss_file}")
+    print("Please ensure the IEEE 13-bus system files are in the correct directory.")
+    exit()
 
-    dss.text(f'compile "{str(dss_file)}"')
-    print("System loaded successfully")
+dss.text(f'compile "{str(dss_file)}"')
+print("System loaded successfully")
 
-    # Configure system
-    dss.text("set mode=snapshot")
-    dss.text("set maxiterations=100")
-    dss.text("set tolerance=0.001")
-    dss.text("set maxcontroliter=50")
-    dss.text("set controlmode=static")
+# Initial system configuration
+print("\nConfiguring system...")
+dss.text("set mode=snapshot")
+dss.text("set maxiterations=150")
+dss.text("set tolerance=0.001")
+dss.text("set controlmode=static")
 
-    # Initial solve
-    dss.text("solve")
-    initial_converged, initial_info = check_convergence_detailed(dss)
+# Configure ZIP load model
+# Typical ZIP coefficients: Z=40%, I=30%, P=30% for residential loads
+Z_PERCENT = 40  # Constant impedance
+I_PERCENT = 30  # Constant current
+P_PERCENT = 30  # Constant power
 
-    if initial_converged:
-        print("✓ Initial solution converged successfully")
-    else:
-        print("❌ Initial solution failed to converge!")
-        return
+print(f"\nConfiguring ZIP load model (Z:{Z_PERCENT}%, I:{I_PERCENT}%, P:{P_PERCENT}%)...")
+set_zip_load_model(dss, Z_PERCENT, I_PERCENT, P_PERCENT)
+zip_coeffs = (Z_PERCENT / 100, I_PERCENT / 100, P_PERCENT / 100)
 
-    # Get load information
-    load_names = dss.loads.names
-    print(f"\nFound {len(load_names)} loads: {load_names}")
+# Initial solve
+print("\nSolving base case with ZIP loads...")
+dss.text("solve")
+converged, conv_info = check_convergence_detailed(dss)
 
-    # Store original load values
-    original_loads = {}
-    original_total_kw = 0
+if not converged:
+    print("Base case failed to converge!")
+    print(f"Convergence info: {conv_info}")
+    exit()
 
-    for load in load_names:
-        dss.loads.name = load
-        original_loads[load] = {
-            'kw': dss.loads.kw,
-            'kvar': dss.loads.kvar
-        }
-        original_total_kw += dss.loads.kw
+print("Base case converged successfully!")
 
-    print(f"Original total load: {original_total_kw:.0f} kW")
+# Get base load data
+load_names = dss.loads.names
+base_loads = {}
+total_base_load = 0
 
-    # Analysis parameters - using lambda (λ) multiplier approach
-    print("\nUsing multiplicative loading method")
-    lambda_values = np.arange(0.1, 10.0, 0.1)  # λ from 0.1 to 10.0
-    print(f"λ range: {min(lambda_values)} to {max(lambda_values)} in steps of 0.1")
-    print(f"Total test points: {len(lambda_values)}")
-
-    # Results storage
-    results = {
-        'lambda_values': [],
-        'total_loads': [],
-        'critical_voltages': [],
-        'critical_bus': [],
-        'converged_points': []
+for load_name in load_names:
+    dss.loads.name = load_name
+    base_loads[load_name] = {
+        'kw': dss.loads.kw,
+        'kvar': dss.loads.kvar
     }
+    total_base_load += dss.loads.kw
 
-    print("\nRunning λ-based loading analysis...")
+print(f"Base system load: {total_base_load:.1f} kW")
 
-    max_lambda = 0
-    convergence_failures = 0
+# Find critical bus
+critical_bus = find_critical_bus(dss)
+print(f"Critical bus identified: {critical_bus}")
 
-    for i, lambda_val in enumerate(lambda_values):
-        print(f"\nTest {i + 1}/{len(lambda_values)}: λ = {lambda_val:.1f}")
+# Generate P-V curve using continuation method with ZIP loads
+print(f"\nGenerating P-V curve using continuation power flow with ZIP load model...")
+print("Pushing load to maximum possible value...")
 
-        # Apply lambda multiplier to all loads
-        total_kw = 0
-        for load in load_names:
-            dss.loads.name = load
-            orig = original_loads[load]
-            new_kw = orig['kw'] * lambda_val
-            new_kvar = orig['kvar'] * lambda_val
+lambda_values, voltages, converged_flags, actual_loads = predictor_corrector_pv_curve_zip(
+    dss, base_loads, critical_bus, zip_coeffs, max_lambda=6.0, initial_step=0.01
+)
 
-            dss.loads.kw = new_kw
-            dss.loads.kvar = new_kvar
-            total_kw += new_kw
+print(f"\nP-V curve generation complete! {len(lambda_values)} points obtained")
 
-        # Reset convergence parameters
-        reset_convergence_parameters(dss)
+if len(lambda_values) > 0:
+    max_lambda = max(lambda_values)
+    max_load = max(actual_loads) if actual_loads else 0
+    print(f"Maximum λ achieved: {max_lambda:.3f}")
+    print(f"Maximum load achieved: {max_load:.1f} kW ({max_load / total_base_load:.2f} times base load)")
 
-        # Solve
-        dss.text("solve")
-        converged, conv_info = check_convergence_detailed(dss)
+# Create clean Voltage vs Lambda graph showing nose curve
+plt.figure(figsize=(12, 8))
 
-        if not converged:
-            print(f"  ❌ Initial solve failed, trying convergence strategies...")
+if len(voltages) > 0:
+    # Plot the P-V curve with lambda on x-axis
+    plt.plot(lambda_values, voltages, 'b-', linewidth=3, label='P-V Curve (ZIP Load Model)')
+    plt.plot(lambda_values, voltages, 'bo', markersize=6, markerfacecolor='lightblue',
+             markeredgecolor='blue', markeredgewidth=1.5)
 
-            # Try convergence strategies
-            for attempt in range(1, 4):
-                conv_result, conv_info = improve_convergence(dss, lambda_val, attempt)
-                if conv_result:
-                    converged = True
-                    break
+    # Find and mark the nose point (minimum voltage)
+    min_voltage_idx = np.argmin(voltages)
+    nose_lambda = lambda_values[min_voltage_idx]
+    nose_voltage = voltages[min_voltage_idx]
 
-            if not converged:
-                print(f"  ❌ Failed to converge at λ = {lambda_val:.1f}")
-                convergence_failures += 1
-                print(f"  Maximum loading reached: λ = {max_lambda:.1f}")
-                break
+    plt.plot(nose_lambda, nose_voltage, 'ro', markersize=14, markerfacecolor='red',
+             markeredgecolor='darkred', markeredgewidth=2,
+             label=f'Nose Point (λ = {nose_lambda:.3f}, V = {nose_voltage:.3f} pu)', zorder=10)
 
-        # Get critical bus voltage
-        min_voltage, critical_bus = get_critical_bus_voltage(dss)
+    # Mark operating point (base case)
+    plt.plot(lambda_values[0], voltages[0], 'go', markersize=12, markerfacecolor='green',
+             markeredgecolor='darkgreen', markeredgewidth=2,
+             label=f'Operating Point (λ = {lambda_values[0]:.3f}, V = {voltages[0]:.3f} pu)', zorder=10)
 
-        if min_voltage == float('inf'):
-            print(f"  ❌ Could not read voltages")
-            continue
+    # Add vertical line at nose point to show maximum loadability
+    plt.axvline(x=nose_lambda, color='red', linestyle='--', alpha=0.6, linewidth=2)
 
-        # Store results
-        results['lambda_values'].append(lambda_val)
-        results['total_loads'].append(total_kw)
-        results['critical_voltages'].append(min_voltage)
-        results['critical_bus'].append(critical_bus)
-        results['converged_points'].append(converged)
+    # Add horizontal voltage limit lines
+    plt.axhline(y=0.95, color='green', linestyle=':', alpha=0.7, linewidth=2, label='Normal Limit (0.95 pu)')
+    plt.axhline(y=0.9, color='orange', linestyle=':', alpha=0.7, linewidth=2, label='Acceptable Limit (0.90 pu)')
 
-        max_lambda = lambda_val
+    # Shade regions to show stability zones
+    if len(lambda_values) > 1:
+        # Stable region (left side of nose)
+        stable_region = [i for i, lam in enumerate(lambda_values) if lam <= nose_lambda]
+        if stable_region:
+            plt.fill_between(lambda_values[:max(stable_region) + 1],
+                             [0] * len(lambda_values[:max(stable_region) + 1]),
+                             voltages[:max(stable_region) + 1],
+                             alpha=0.1, color='green', label='Stable Region')
 
-        # Check for voltage warnings
-        if min_voltage < 0.9:  # Below 0.9 per unit (assuming 1 kV base)
-            voltage_warning = f"⚠ Low voltage warning: {min_voltage:.2f} kV"
-        else:
-            voltage_warning = ""
+        # Unstable region (right side of nose)
+        unstable_region = [i for i, lam in enumerate(lambda_values) if lam > nose_lambda]
+        if unstable_region:
+            plt.fill_between(lambda_values[min(unstable_region):],
+                             [0] * len(lambda_values[min(unstable_region):]),
+                             voltages[min(unstable_region):],
+                             alpha=0.1, color='red', label='Unstable Region')
 
-        print(f"  ✓ Converged: Load = {total_kw:.0f} kW, Critical V = {min_voltage:.2f} kV")
-        if voltage_warning:
-            print(f"  {voltage_warning}")
+    # Add annotations for key regions
+    mid_stable_idx = len([lam for lam in lambda_values if lam <= nose_lambda]) // 2
+    if mid_stable_idx > 0:
+        plt.annotate('STABLE\nREGION',
+                     xy=(lambda_values[mid_stable_idx], voltages[mid_stable_idx]),
+                     xytext=(lambda_values[mid_stable_idx] - 0.3, voltages[mid_stable_idx] + 0.1),
+                     fontsize=12, fontweight='bold', color='green',
+                     ha='center', va='center',
+                     bbox=dict(boxstyle="round,pad=0.3", facecolor='lightgreen', alpha=0.7),
+                     arrowprops=dict(arrowstyle='->', color='green', lw=2))
 
-    print(f"\nAnalysis complete! {len(results['lambda_values'])} successful data points")
-    print(f"Maximum λ achieved: {max_lambda:.1f}")
+    if len(lambda_values) > min_voltage_idx + 5:
+        unstable_idx = min_voltage_idx + (len(lambda_values) - min_voltage_idx) // 2
+        plt.annotate('UNSTABLE\nREGION',
+                     xy=(lambda_values[unstable_idx], voltages[unstable_idx]),
+                     xytext=(lambda_values[unstable_idx] + 0.2, voltages[unstable_idx] + 0.15),
+                     fontsize=12, fontweight='bold', color='red',
+                     ha='center', va='center',
+                     bbox=dict(boxstyle="round,pad=0.3", facecolor='lightcoral', alpha=0.7),
+                     arrowprops=dict(arrowstyle='->', color='red', lw=2))
 
-    # Create P-V curve plot
-    create_pv_curve_plot(results, original_total_kw)
+    # Add nose point annotation
+    plt.annotate(f'NOSE POINT\n(Maximum Loadability)\nλ = {nose_lambda:.3f}\nV = {nose_voltage:.3f} pu',
+                 xy=(nose_lambda, nose_voltage),
+                 xytext=(nose_lambda - 0.4, nose_voltage + 0.25),
+                 fontsize=11, fontweight='bold', color='darkred',
+                 ha='center', va='center',
+                 bbox=dict(boxstyle="round,pad=0.5", facecolor='yellow', alpha=0.8, edgecolor='red'),
+                 arrowprops=dict(arrowstyle='->', color='red', lw=3))
 
-    # Print summary
-    print_pv_analysis_summary(results, original_total_kw, convergence_failures)
+# Customize the plot
+plt.title('Voltage Stability Analysis: P-V Curve (Nose Curve)\nZIP Load Model - Bus Voltage vs Loading Parameter',
+          fontweight='bold', fontsize=16, pad=20)
+plt.xlabel('Loading Parameter (λ)', fontsize=14, fontweight='bold')
+plt.ylabel('Critical Bus Voltage (pu)', fontsize=14, fontweight='bold')
 
+# Enhanced grid
+plt.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+plt.grid(True, alpha=0.2, linestyle=':', linewidth=0.3, which='minor')
 
-def create_pv_curve_plot(results, original_total_kw):
-    """
-    Create the P-V curve showing voltage stability characteristics
-    """
-    if not results['lambda_values']:
-        print("No data to plot")
-        return
+# Legend
+plt.legend(fontsize=11, loc='lower left', framealpha=0.9, fancybox=True, shadow=True)
 
-    # Convert to per unit values
-    P_pu = np.array(results['lambda_values'])  # λ values are already per unit
-    V_pu = np.array(results['critical_voltages'])  # Assuming 1 kV base voltage
+# Set axis limits for better visibility of the nose
+if lambda_values and voltages:
+    lambda_range = max(lambda_values) - min(lambda_values)
+    voltage_range = max(voltages) - min(voltages)
 
-    # Create the P-V curve
-    plt.figure(figsize=(12, 8))
+    plt.xlim(min(lambda_values) - 0.05 * lambda_range, max(lambda_values) + 0.05 * lambda_range)
+    plt.ylim(min(voltages) - 0.05 * voltage_range, max(voltages) + 0.1 * voltage_range)
 
-    # Plot the P-V curve
-    plt.plot(P_pu, V_pu, 'b-', linewidth=3, label='P-V Curve')
-    plt.plot(P_pu, V_pu, 'bo', markersize=4, alpha=0.6)
+# Add subtle background
+plt.gca().set_facecolor('#fafafa')
 
-    # Mark operating point (λ = 1.0)
-    if 1.0 in results['lambda_values']:
-        idx = results['lambda_values'].index(1.0)
-        plt.plot(1.0, results['critical_voltages'][idx], 'go', markersize=12,
-                 label='Operating Point', markerfacecolor='green', markeredgecolor='darkgreen', markeredgewidth=2)
+plt.tight_layout()
+plt.show()
 
-    # Mark maximum loadability point
-    max_lambda = max(results['lambda_values'])
-    max_idx = results['lambda_values'].index(max_lambda)
-    plt.plot(max_lambda, results['critical_voltages'][max_idx], 'ro', markersize=12,
-             label=f'Maximum Loadability Point\n(λ = {max_lambda:.1f})',
-             markerfacecolor='red', markeredgecolor='darkred', markeredgewidth=2)
+# Print comprehensive summary
+print("\n" + "=" * 90)
+print("ZIP LOAD MODEL P-V CURVE ANALYSIS SUMMARY")
+print("=" * 90)
+print(f"Load Model Configuration: Z={Z_PERCENT}%, I={I_PERCENT}%, P={P_PERCENT}%")
+print(f"Total points in P-V curve: {len(lambda_values)}")
+print(f"Base case voltage: {voltages[0]:.3f} pu" if voltages else "No data")
+print(f"Base system load: {total_base_load:.1f} kW")
 
-    # Add voltage stability margin annotation
-    if 1.0 in results['lambda_values']:
-        plt.annotate('', xy=(max_lambda, 0.1), xytext=(1.0, 0.1),
-                     arrowprops=dict(arrowstyle='<->', color='purple', lw=2))
-        plt.text((1.0 + max_lambda) / 2, 0.05, 'Voltage Stability Margin',
-                 ha='center', va='bottom', fontsize=12, color='purple', fontweight='bold')
+if len(voltages) > 1 and actual_loads:
+    min_voltage_idx = np.argmin(voltages)
+    max_load_factor = load_factors[min_voltage_idx]
+    min_voltage = voltages[min_voltage_idx]
+    max_actual_load = actual_loads[min_voltage_idx]
 
-    # Formatting
-    plt.xlabel('Load Parameter (λ)', fontsize=14, fontweight='bold')
-    plt.ylabel('Critical Bus Voltage (per unit)', fontsize=14, fontweight='bold')
-    plt.title('P-V Curve - Voltage Stability Analysis\nIEEE 13-Bus Test System',
-              fontsize=16, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=12)
+    print(f"\nMaximum Loadability Results:")
+    print(f"  Maximum load factor (λ): {max_load_factor:.3f}")
+    print(f"  Critical voltage: {min_voltage:.3f} pu")
+    print(f"  Maximum load achieved: {max_actual_load:.1f} kW")
+    print(f"  Load increase: {(max_load_factor - 1) * 100:.1f}%")
+    print(f"  Load multiplication factor: {max_actual_load / total_base_load:.2f}x")
 
-    # Set axis limits
-    plt.xlim(0, max(P_pu) * 1.1)
-    plt.ylim(0, max(V_pu) * 1.1)
+    # Calculate stability margins
+    operating_voltage = voltages[0]
+    voltage_margin = ((operating_voltage - min_voltage) / operating_voltage) * 100
+    loading_margin = ((max_load_factor - 1) / 1) * 100
 
-    # Add stability regions
-    plt.axhline(y=0.9, color='orange', linestyle='--', alpha=0.7, label='Voltage Limit (0.9 pu)')
-    plt.axvline(x=max_lambda, color='red', linestyle='--', alpha=0.7)
+    print(f"\nStability Margins:")
+    print(f"  Voltage stability margin: {voltage_margin:.1f}%")
+    print(f"  Loading margin: {loading_margin:.1f}%")
+    print(f"  Power transfer capability: {max_actual_load - total_base_load:.1f} kW additional")
 
-    plt.tight_layout()
-    plt.show()
-
-
-def print_pv_analysis_summary(results, original_total_kw, convergence_failures):
-    """
-    Print comprehensive P-V analysis summary
-    """
-    print("\n" + "=" * 80)
-    print("P-V CURVE ANALYSIS SUMMARY")
-    print("=" * 80)
-    print(f"Loading Method: multiplicative (λ-based)")
-    print(f"Original system load: {original_total_kw:.0f} kW")
-    print(f"Successful data points: {len(results['lambda_values'])}")
-    print(f"Convergence failures: {convergence_failures}")
-
-    if results['lambda_values']:
-        max_lambda = max(results['lambda_values'])
-        min_voltage = min(results['critical_voltages'])
-
-        print(f"λ range achieved: {min(results['lambda_values']):.1f} to {max_lambda:.1f}")
-        print(f"Maximum loadability: {max_lambda:.1f} × base load")
-        print(f"Maximum load achieved: {max(results['total_loads']):.0f} kW")
-        print(f"Critical voltage range: {min_voltage:.2f} to {max(results['critical_voltages']):.2f} per unit")
-        print(
-            f"Voltage stability margin: {max_lambda - 1.0:.1f} per unit" if max_lambda > 1.0 else "System unstable at base load")
-
-    print("=" * 80)
-
-
-if __name__ == "__main__":
-    run_pv_curve_analysis()
+print(f"\nCritical bus: {critical_bus}")
+print(f"ZIP load model provides more realistic load behavior compared to constant power model")
+print("=" * 90)
